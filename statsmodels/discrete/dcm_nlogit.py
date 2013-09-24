@@ -20,13 +20,39 @@ import pandas as pd
 from statsmodels.base.model import LikelihoodModel
 import time
 from collections import OrderedDict
+from pprint import pprint
 
+
+# note: values for tau's set =1 on fit
 
 # TODO: need some fixes to have minimal functionality
 # TODO: clean data handling
 # TODO: work on TODO recursive tree structure
 # TODO: improve model
 
+
+def getbranches(tree):
+    '''
+    walk tree to get list of branches
+
+    Parameters
+    ----------
+    tree : list of tuples
+        tree as defined for RU2NMNL
+
+    Returns
+    -------
+    branch : list
+        list of all branch names
+
+    '''
+    if type(tree) == tuple:
+        name, subtree = tree
+        a = [name]
+        for st in subtree:
+            a.extend(getbranches(st))
+        return a
+    return []
 
 def getnodes(tree):
     '''
@@ -55,41 +81,21 @@ def getnodes(tree):
         else:
             adeg = []
 
-            for st in subtree:
-                b, l, d = getnodes(st)
-                ab.extend(b)
-                al.extend(l)
-                adeg.extend(d)
+        for st in subtree:
+            b, l, d = getnodes(st)
+            ab.extend(b)
+            al.extend(l)
+            adeg.extend(d)
         return ab, al, adeg
     return [], [tree], []
 
 
-def getbranches(tree):
-    '''
-    walk tree to get list of branches
-
-    Parameters
-    ----------
-    tree : list of tuples
-        tree as defined for RU2NMNL
-
-    Returns
-    -------
-    branch : list
-        list of all branch names
-
-    '''
-    if type(tree) == tuple:
-        name, subtree = tree
-        a = [name]
-        for st in subtree:
-            a.extend(getbranches(st))
-        return a
-    return []
-
-
 class NLogit(LikelihoodModel):
     __doc__ = """
+    Non-normalized nested logit (NNNL)
+    fixed (temporaly) normalized at the top (tau top = 1 )
+    # TODO add example to show how values are independent of the normalization
+
     See treewalkerclass.py
     """
 
@@ -148,15 +154,8 @@ class NLogit(LikelihoodModel):
         self.recursionparams = np.zeros(len(self.paramsnames))
         print len(self.paramsnames)
         #self.recursionparams[2] = 1
-        self.recursionparams[-self.nbranches:] = 1  # values for tau's
+#        self.recursionparams[-self.nbranches:] = 1  # values for tau's
         #self.recursionparams[-2] = 2
-
-        # TODO
-#        self.datadict = dict(zip(['air', 'train', 'bus', 'car'],
-#                        np.array([5, 5, 5, 5])))
-        self.datadict.update({'top' :    [],
-                              'fly' :    [],
-                              'ground':  []})
 
     def _initialize(self):
         """
@@ -186,9 +185,19 @@ class NLogit(LikelihoodModel):
         #TODO
         datadict = {}
         datadict = dict(zip(self.V.keys(),
-                        [exog_bychoices[i] for i in range(4)]))
+                        [exog_bychoices[i][0:number_data] for i in range(4)]))
+
+        #for testing only (mock that returns it's own name
+        if testxb == 1:
+            datadict = dict(zip(['air', 'train', 'bus', 'car'],
+                            ['Airdata', 'Traindata', 'Busdata', 'Cardata']))
 
         self.datadict = datadict
+
+        self.datadict.update({'top' :    [],
+                              'fly' :    [],
+                              'ground':  []})
+
         # Betas
         beta_not_common = ([len(exog_bychoices_names[ii]) - self.ncommon
                             for ii in range(self.J)])
@@ -267,16 +276,20 @@ class NLogit(LikelihoodModel):
 
 
         '''
-        self.recursionparams = params
+        if testxb < 2:
+            print "fix testxb = 1"
+        else:
+            self.recursionparams = params
+            print "params", params
+            self.calc_prob(self.tree)
 
-        self.calc_prob(self.tree)
-        probs_array = np.array([self.probs[leaf] for leaf in self.leaves])
-        for leaf in self.leaves:
-            print leaf
-        return probs_array
-        #what's the ordering? Should be the same as sequence in tree.
-        #TODO: need a check/assert that this sequence is the same as the
-        #      encoding in endog
+            probs_array = np.array([self.probs[leaf] for leaf in self.leaves])
+            print self.leaves    # ['air', 'train', 'car', 'bus']
+            print "_______________________________________________________________"
+            return probs_array
+            #what's the ordering? Should be the same as sequence in tree.
+            #TODO: need a check/assert that this sequence is the same as the
+            #      encoding in endog
 
     def calc_prob(self, tree, parent=None):
         '''walking a tree bottom-up based on dictionary
@@ -286,7 +299,7 @@ class NLogit(LikelihoodModel):
         #should be tau=self.taus[name] but as part of params for optimization
 #        endog = self.endog
         datadict = self.datadict
-#        paramsind = self.paramsind
+        paramsind = self.paramsind
         branchsum = self.branchsum
 
 
@@ -301,26 +314,30 @@ class NLogit(LikelihoodModel):
                 print name, datadict[name], 'tau=', tau
                 print 'subtree', subtree
             branchvalue = []
+
             if testxb == 2:
+                if DEBUG:
+                    print "branchsum = 0"
                 branchsum = 0
+
             elif testxb == 1:
                 branchsum = datadict[name]
-            else:
-                branchsum = name
+
             for b in subtree:
                 if DEBUG:
-                    print b
+                    print "___starting with (b):", b, ",in branch", name
                 bv = self.calc_prob(b, name)
-                bv = np.exp(bv/tau)  #this shouldn't be here, when adding branch data
-                branchvalue.append(bv)
-                print "bv shape is" , bv.shape
-                print name
-                print datadict[name]
-                print "branchsum is" , branchsum
+                if DEBUG:
+                    print "intial branchsum is", branchsum
+                    print "__bv is", bv
 
+                branchvalue.append(bv)
                 branchsum = branchsum + bv
-#                branchsum =+ bv
-            self.branchvalues[name] = branchvalue #keep track what was returned
+
+                if DEBUG:
+                    print "after bv, branchsum is", branchsum
+
+            self.branchvalues[name] = branchvalue   # keep track what was returned
 
             if DEBUG:
                 print '----------- returning to branch-----------',
@@ -330,101 +347,101 @@ class NLogit(LikelihoodModel):
             if parent:
                 if DEBUG:
                     print 'parent', parent
+                    print '__calc the prob of leaves of', name
                 self.branchleaves[parent].extend(self.branchleaves[name])
-            if 0:  #not name == 'top':  # not used anymore !!! ???
-            #if not name == 'top':
-                #TODO: do I need this only on the lowest branches ?
-                tmpsum = 0
-                for k in self.branchleaves[name]:
-                    #similar to this is now also in return branch values
-                    #depends on what will be returned
-                    tmpsum += self.probs[k]
-                    iv = np.log(tmpsum)
 
-                for k in self.branchleaves[name]:
-                    self.probstxt[k] = self.probstxt[k] + ['*' + name + '-prob' +
-                                    '(%s)' % ', '.join(self.paramsind[name])]
-
-                    #TODO: does this use the denominator twice now
-                    self.probs[k] = self.probs[k] / tmpsum
-                    if np.size(self.datadict[name])>0:
-                        #not used yet, might have to move one indentation level
-                        #self.probs[k] = self.probs[k] / tmpsum
-##                            np.exp(-self.datadict[name] *
-##                             np.sum(self.recursionparams[self.parinddict[name]]))
-                        if DEBUG:
-                            print 'self.datadict[name], self.probs[k]',
-                            print self.datadict[name], self.probs[k]
-                    #if not name == 'top':
-                    #    self.probs[k] = self.probs[k] * np.exp( iv)
-
-            #walk one level down again to add branch probs to instance.probs
-            self.bprobs[name] = []
-            for bidx, b in enumerate(subtree):
-                if DEBUG:
-                    print 'repr(b)', repr(b), bidx
-                #if len(b) == 1: #TODO: skip leaves, check this
-                if not type(b) == tuple: # isinstance(b, str):
-                    #TODO: replace this with a check for branch (tuple) instead
-                    #this implies name is a bottom branch,
-                    #possible to add special things here
-                    self.bprobs[name].append(self.probs[b])
-                    #TODO: need tau possibly here
-                    self.probs[b] = self.probs[b] / branchsum
+            if testxb < 2:
+                return branchsum
+            else:
+                self.bprobs[name] = []
+                for bidx, b in enumerate(subtree):
                     if DEBUG:
-                        print '*********** branchsum at bottom branch', branchsum
-                    #self.bprobs[name].append(self.probs[b])
-                else:
-                    bname = b[0]
-                    branchsum2 = sum(self.branchvalues[name])
-                    assert np.abs(branchsum - branchsum2).sum() < 1e-8
-                    bprob = branchvalue[bidx]/branchsum
-                    self.bprobs[name].append(bprob)
+                        print 'bottom branch: repr(b)', repr(b), bidx
+                    #if len(b) == 1: #TODO: skip leaves, check this
+                    if not type(b) == tuple: # isinstance(b, str):
+                        #TODO: replace this with a check for branch (tuple) instead
+                        #this implies name is a bottom branch,
+                        #possible to add special things here
+                        #TODO: need tau possibly here
+                        if DEBUG:
+                            print "num-prob", self.probs[b]
+                        self.probs[b] = self.probs[b] / branchsum  # normalized prob
+                        if DEBUG:
+                            print "leaf prob (normalized):", self.probs[b]
+                            print '*********** branchsum at bottom branch', branchsum
 
-                    for k in self.branchleaves[bname]:
+                    else:
+                        bname = b[0]
+                        if DEBUG:
+                            print '__calc the prob of branches of', name
+                        branchsum2 = sum(self.branchvalues[name])
+#                        assert np.abs(branchsum - branchsum2).sum() < 1e-8
+                        bprob = branchvalue[bidx]/branchsum2 # normalized prob
+                        self.bprobs[name].append(bprob)
 
                         if DEBUG:
-                            print 'branchprob', bname, k, bprob, branchsum
-                        #temporary hack with maximum to avoid zeros
-                        self.probs[k] = self.probs[k] * np.maximum(bprob, 1e-4)
+                            print "branch:", bname, "num:", bidx
+                            print "branchvalue:", branchvalue[bidx], "prob", bprob
+                            print '__calc the prob of alternative inside',bname
+
+                        for k in self.branchleaves[bname]:
+
+                            if DEBUG:
+                                print k,": leaf prob",  self.probs[k],"*",
+                                print 'branchprob',bname,  bprob
+                                print "    --_> prob alternative", self.probs[k] * bprob
+                            self.probs[k] = self.probs[k] * bprob
 
 
             if DEBUG:
-                print 'working on branch', tree, branchsum
+                print '__now working on @branch@', tree
             if testxb < 2:
                 return branchsum
             else: #this is the relevant part
                 self.branchsums[name] = branchsum
                 if np.size(self.datadict[name])>0:
-                    branchxb = np.sum(self.datadict[name] *
+                    branchxb = np.dot(self.datadict[name] ,
                                   self.recursionparams[self.parinddict[name]])
                 else:
                     branchxb = 0
                 if not name =='top':
                     tau = self.recursionparams[self.paramsidx['tau_'+name]]
+
                 else:
                     tau = 1
-                iv = branchxb + tau * branchsum #which tau: name or parent???
-                return branchxb + tau * np.log(branchsum) #iv
+#                iv = branchxb + tau * branchsum #which tau: name or parent???
+                if DEBUG:
+                    print "brach prob:"
+                    print  np.exp(branchxb + tau * np.log(branchsum))
+                    print "for:", name, "tau:", tau, "brancxb", branchxb
+
+                return  np.exp(branchxb + tau * np.log(branchsum)) #iv
                 #branchsum is now IV, TODO: add effect of branch variables
 
         else:
+            print "working on @leaf@", tree
             tau = self.recursionparams[self.paramsidx['tau_'+parent]]
-            if DEBUG:
-                print 'parent', parent
+
             self.branchleaves[parent].append(tree) # register leave with parent
             self.probstxt[tree] = [tree + '-prob' +
                                 '(%s)' % ', '.join(self.paramsind[tree])]
-            #this is not yet a prob, not normalized to 1, it is exp(x*b)
-            leafprob = np.exp(np.sum(self.datadict[tree] *
-                                  self.recursionparams[self.parinddict[tree]])
-                              / tau)   # fake tau for now, wrong spot ???
-            #it seems I get the same answer with and without tau here
-            self.probs[tree] = leafprob  #= 1 #try initialization only
-            #TODO: where  should I add tau in the leaves
 
             if testxb == 2:
-                return np.log(leafprob)
+                if DEBUG:
+                    print 'parent', parent
+                    print "for", tree, self.probstxt[tree]
+                    #this is not yet a prob, not normalized to 1, it is exp(x*b)
+                leafprob = np.exp(np.dot(self.datadict[tree] ,
+                                  self.recursionparams[self.parinddict[tree]])
+                              / tau)   # fake tau for now, wrong spot ???
+                #it seems I get the same answer with and without tau here
+                self.probs[tree] = leafprob  #= 1 #try initialization only
+                #TODO: where  should I add tau in the leaves
+
+                if DEBUG:
+                    print "numerator leaf prob:", leafprob
+                    print "for:", tree, "tau:", tau
+                return leafprob
             elif testxb == 1:
                 leavessum = np.array(datadict[tree])  # sum((datadict[bi] for bi in datadict[tree]))
                 if DEBUG:
@@ -455,27 +472,28 @@ class NLogit(LikelihoodModel):
         where :
 
         """
-
+        params[-self.nbranches:] = 1  # values for tau's
+        print params
         prob = self.get_probs(params)
         loglike = np.log(prob).sum(1)
+
+        print "loglike", loglike.sum()
         return loglike.sum()
 
     def score(self, params):
         """
         """
         loglike = self.loglike
-        params = self.recursionparams
         from statsmodels.tools.numdiff import approx_fprime
         return approx_fprime(params, loglike, epsilon=1e-8)
 
     def hessian(self, params):
         """
         """
-
         from statsmodels.tools.numdiff import approx_hess
         return approx_hess(self.recursionparams, self.loglike)
 
-    def fit(self, start_params=None, maxiter=10000, maxfun=5000,
+    def fit(self, start_params=None, maxiter=10, maxfun=5000,
             method="bfgs", full_output=1, disp=None, callback=None, **kwds):
 
         """
@@ -489,6 +507,7 @@ class NLogit(LikelihoodModel):
         if start_params is None:
 
             start_params = np.zeros(self.nparams)
+            start_params[-self.nbranches:] = 1  # values for tau's
 
         else:
             start_params = np.asarray(start_params)
@@ -542,7 +561,7 @@ if __name__ == "__main__":
     tree = ('top',
             [('fly', ['air']),
              ('ground', ['train', 'car', 'bus'])
-             ]
+            ]
         )
 
     # TODO: set paramsind inside class
@@ -552,15 +571,16 @@ if __name__ == "__main__":
     paramsind = {'top' :   [],
                  'fly' :   [],
                  'ground': [],
-                 'air' :   ['gc', 'ttme', 'constA', 'hinc'],
+                 'air' :   ['gc', 'ttme', 'constA','hinc' ],
                  'train' : ['gc', 'ttme', 'constT'],
                  'bus' :   ['gc', 'ttme', 'constB'],
                  'car' :   ['gc', 'ttme']
                  }
 
     # TODO: testxb = 1 fix me shapes (0) (210,4)
-    testxb = 2   #global to class to return strings instead of numbers
-    DEBUG = 1
+    testxb = 2 #global to class to return strings(testxb = 1)instead of numbers
+    DEBUG = 0
+    number_data = 200 #number of data to use [1 -210]
     # Describe model
     nlogit_mod = NLogit(endog_data = y, exog_data = X, V = V,
                         ncommon = ncommon,
@@ -568,20 +588,21 @@ if __name__ == "__main__":
                         ref_level = 'car',
                         name_intercept = 'Intercept')
 
-    # Fit model
-#    nlogit_res = nlogit_mod.fit(disp=1)
-#    print nlogit_res.params
-#    print nlogit_res.llf
+    # Get probs for fixed params
+    clogit_params = np.array([-0.01550153, -0.0961248 ,  5.2074433 ,
+                              0.01328703,  3.8690427 ,3.16319421])
+    nlogit_params = np.array([-0.03158784, -0.11261758,  6.04237265,
+                              0.02616173,  5.06461963, 4.09632551 ]) #¿0.015333? R:0.02616173
 
-    print nlogit_mod.paramsnames
-    print nlogit_mod.paramsidx
-    print nlogit_mod.parinddict
+    idx = np.array([2,5,4,0,3,1])   # index to reorder
+    params_clogit =  np.r_[clogit_params[idx], np.array([1, 1, 1])]
+    params_nlogit =  np.r_[nlogit_params[idx], np.array([1, 0.586009, 0.388962])]
 
-    print nlogit_mod.branches
-    print nlogit_mod.branchleaves
-    print nlogit_mod.branchvalues
-
-    print nlogit_mod.recursionparams
-
-    print nlogit_mod.get_probs(nlogit_mod.recursionparams)
+#    print nlogit_mod.get_probs(params_nlogit) # 0.373408057	0.15153919	0.3518454625	0.1232072868
+#    print nlogit_mod.get_probs(params_clogit) #[ 0.07885308  0.36981623  0.3828983   0.16843239]
     check_datadict = nlogit_mod.datadict
+
+    # Fit model
+    nlogit_res = nlogit_mod.fit( start_params = params_clogit )
+    print nlogit_res.params
+#    print nlogit_res.llf
