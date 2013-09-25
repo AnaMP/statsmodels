@@ -20,15 +20,17 @@ import pandas as pd
 from statsmodels.base.model import LikelihoodModel
 import time
 from collections import OrderedDict
-from pprint import pprint
 
-
-# note: values for tau's set =1 on fit
+import os
+from dcm_clogit import CLogit
 
 # TODO: need some fixes to have minimal functionality
 # TODO: clean data handling
 # TODO: work on TODO recursive tree structure
 # TODO: improve model
+# TODO: add TAU warnings for consistent with utility maximization
+
+# note: set values for tau's = 1 on loglike for replicate clogit
 
 
 def getbranches(tree):
@@ -53,6 +55,7 @@ def getbranches(tree):
             a.extend(getbranches(st))
         return a
     return []
+
 
 def getnodes(tree):
     '''
@@ -92,8 +95,10 @@ def getnodes(tree):
 
 class NLogit(LikelihoodModel):
     __doc__ = """
-    Non-normalized nested logit (NNNL)
-    fixed (temporaly) normalized at the top (tau top = 1 )
+    Random utility maximization nested logit (RUMNL o UMNL)
+    RU2 Normalization: moving Scaling Down to the Twig Level
+    FIML (Full information ML): Fit the entire model at once, imposing all restrictions
+    (fixed (temporaly) normalized at the top (tau top = 1 ))
     # TODO add example to show how values are independent of the normalization
 
     See treewalkerclass.py
@@ -111,16 +116,6 @@ class NLogit(LikelihoodModel):
 
         self.ref_level = ref_level
 
-        if name_intercept == None:
-            self.exog_data['Intercept'] = 1
-            self.name_intercept = 'Intercept'
-        else:
-            self.name_intercept = name_intercept
-
-        self._initialize()
-        super(NLogit, self).__init__(endog = endog_data,
-                exog = self.exog_matrix, **kwds)
-
         self.tree = tree
         self.paramsind = paramsind
 
@@ -133,6 +128,17 @@ class NLogit(LikelihoodModel):
         self.bprobs = {}
         self.branches, self.leaves, self.branches_degenerate = getnodes(tree)
         self.nbranches = len(self.branches)
+
+        if name_intercept == None:
+            self.exog_data['Intercept'] = 1
+            self.name_intercept = 'Intercept'
+        else:
+            self.name_intercept = name_intercept
+
+        self._initialize()
+        super(NLogit, self).__init__(endog = endog_data,
+                exog = self.exog_matrix, **kwds)
+
 
         #copied over but not quite sure yet
         #unique, parameter array names,
@@ -149,14 +155,6 @@ class NLogit(LikelihoodModel):
         self.parinddict = dict((k, [self.paramsidx[j] for j in v])
                                for k, v in self.paramsind.items())
 
-        self.recursionparams = 1. + np.arange(len(self.paramsnames))
-        #for testing that individual parameters are used in the right place
-        self.recursionparams = np.zeros(len(self.paramsnames))
-        print len(self.paramsnames)
-        #self.recursionparams[2] = 1
-#        self.recursionparams[-self.nbranches:] = 1  # values for tau's
-        #self.recursionparams[-2] = 2
-
     def _initialize(self):
         """
         Preprocesses the data for Nlogit
@@ -167,6 +165,16 @@ class NLogit(LikelihoodModel):
 
         # Endog_bychoices
         self.endog_bychoices = self.endog_data.values.reshape(-1, self.J)
+        self.endog_bychoices = self.endog_bychoices[0:number_data]
+
+        endogdict = OrderedDict()
+        for ii, key in enumerate(self.V.keys()):
+            endogdict[key] = self.endog_bychoices[:,ii]
+
+        if not self.V.keys() == self.leaves:
+            self.endog_ordered = np.array([endogdict[leaf] for leaf in self.leaves]).T
+        else:
+            self.endog_ordered = self.endog_bychoices
 
         # Exog_bychoices
         exog_bychoices = []
@@ -252,7 +260,6 @@ class NLogit(LikelihoodModel):
         self.df_model = self.K
         self.df_resid = int(self.nobs - self.K)
 
-
     def get_probs(self, params):
         '''
         obtain the probability array given an array of parameters
@@ -280,14 +287,9 @@ class NLogit(LikelihoodModel):
             print "fix testxb = 1"
         else:
             self.recursionparams = params
-            print "params", params
             self.calc_prob(self.tree)
-
-            probs_array = np.array([self.probs[leaf] for leaf in self.leaves])
-            print self.leaves    # ['air', 'train', 'car', 'bus']
-            print "_______________________________________________________________"
-            return probs_array
-            #what's the ordering? Should be the same as sequence in tree.
+            self.probs_array = np.array([self.probs[leaf] for leaf in self.leaves]).T
+            return self.probs_array
             #TODO: need a check/assert that this sequence is the same as the
             #      encoding in endog
 
@@ -297,18 +299,16 @@ class NLogit(LikelihoodModel):
 
         #0.5#2 #placeholder for now
         #should be tau=self.taus[name] but as part of params for optimization
-#        endog = self.endog
         datadict = self.datadict
         paramsind = self.paramsind
         branchsum = self.branchsum
 
-
-        if type(tree) == tuple:   #assumes leaves are int for choice index
+        if type(tree) == tuple:   # assumes leaves are int for choice index
 
             name, subtree = tree
-            self.branchleaves[name] = []  #register branch in dictionary
+            self.branchleaves[name] = []  # register branch in dictionary
 
-            tau = self.recursionparams[self.paramsidx['tau_'+name]]
+            tau = self.recursionparams[self.paramsidx['tau_' + name]]
             if DEBUG:
                 print '----------- starting next branch-----------'
                 print name, datadict[name], 'tau=', tau
@@ -358,7 +358,7 @@ class NLogit(LikelihoodModel):
                     if DEBUG:
                         print 'bottom branch: repr(b)', repr(b), bidx
                     #if len(b) == 1: #TODO: skip leaves, check this
-                    if not type(b) == tuple: # isinstance(b, str):
+                    if not type(b) == tuple:  # isinstance(b, str):
                         #TODO: replace this with a check for branch (tuple) instead
                         #this implies name is a bottom branch,
                         #possible to add special things here
@@ -376,36 +376,35 @@ class NLogit(LikelihoodModel):
                             print '__calc the prob of branches of', name
                         branchsum2 = sum(self.branchvalues[name])
 #                        assert np.abs(branchsum - branchsum2).sum() < 1e-8
-                        bprob = branchvalue[bidx]/branchsum2 # normalized prob
+                        bprob = branchvalue[bidx] / branchsum2  # normalized prob
                         self.bprobs[name].append(bprob)
 
                         if DEBUG:
                             print "branch:", bname, "num:", bidx
                             print "branchvalue:", branchvalue[bidx], "prob", bprob
-                            print '__calc the prob of alternative inside',bname
+                            print '__calc the prob of alternative inside', bname
 
                         for k in self.branchleaves[bname]:
 
                             if DEBUG:
-                                print k,": leaf prob",  self.probs[k],"*",
-                                print 'branchprob',bname,  bprob
+                                print k,": leaf prob", self.probs[k], "*",
+                                print 'branchprob', bname,  bprob
                                 print "    --_> prob alternative", self.probs[k] * bprob
                             self.probs[k] = self.probs[k] * bprob
-
 
             if DEBUG:
                 print '__now working on @branch@', tree
             if testxb < 2:
                 return branchsum
-            else: #this is the relevant part
+            else:   #this is the relevant part
                 self.branchsums[name] = branchsum
-                if np.size(self.datadict[name])>0:
-                    branchxb = np.dot(self.datadict[name] ,
+                if np.size(self.datadict[name]) > 0:
+                    branchxb = np.dot(self.datadict[name],
                                   self.recursionparams[self.parinddict[name]])
                 else:
                     branchxb = 0
-                if not name =='top':
-                    tau = self.recursionparams[self.paramsidx['tau_'+name]]
+                if not name == 'top':
+                    tau = self.recursionparams[self.paramsidx['tau_' + name]]
 
                 else:
                     tau = 1
@@ -415,14 +414,15 @@ class NLogit(LikelihoodModel):
                     print  np.exp(branchxb + tau * np.log(branchsum))
                     print "for:", name, "tau:", tau, "brancxb", branchxb
 
-                return  np.exp(branchxb + tau * np.log(branchsum)) #iv
+                return  np.exp(branchxb + tau * np.log(branchsum))  # iv
                 #branchsum is now IV, TODO: add effect of branch variables
 
         else:
-            print "working on @leaf@", tree
-            tau = self.recursionparams[self.paramsidx['tau_'+parent]]
+            if DEBUG:
+                print "working on @leaf@", tree
+            tau = self.recursionparams[self.paramsidx['tau_' + parent]]
 
-            self.branchleaves[parent].append(tree) # register leave with parent
+            self.branchleaves[parent].append(tree)   # register leave with parent
             self.probstxt[tree] = [tree + '-prob' +
                                 '(%s)' % ', '.join(self.paramsind[tree])]
 
@@ -431,12 +431,12 @@ class NLogit(LikelihoodModel):
                     print 'parent', parent
                     print "for", tree, self.probstxt[tree]
                     #this is not yet a prob, not normalized to 1, it is exp(x*b)
-                leafprob = np.exp(np.dot(self.datadict[tree] ,
+                leafprob = np.exp(np.dot(self.datadict[tree],
                                   self.recursionparams[self.parinddict[tree]])
                               / tau)   # fake tau for now, wrong spot ???
-                #it seems I get the same answer with and without tau here
+                # it seems I get the same answer with and without tau here
                 self.probs[tree] = leafprob  #= 1 #try initialization only
-                #TODO: where  should I add tau in the leaves
+                # TODO: where  should I add tau in the leaves
 
                 if DEBUG:
                     print "numerator leaf prob:", leafprob
@@ -445,7 +445,7 @@ class NLogit(LikelihoodModel):
             elif testxb == 1:
                 leavessum = np.array(datadict[tree])  # sum((datadict[bi] for bi in datadict[tree]))
                 if DEBUG:
-                    print 'final branch with', tree, ''.join(tree), leavessum #sum(tree)
+                    print 'final branch with', tree, ''.join(tree), leavessum  # sum(tree)
                 return leavessum  # sum(xb[tree])
             elif testxb == 0:
                 return ''.join(tree)  # sum(tree)
@@ -472,29 +472,29 @@ class NLogit(LikelihoodModel):
         where :
 
         """
-        params[-self.nbranches:] = 1  # values for tau's
-        print params
-        prob = self.get_probs(params)
-        loglike = np.log(prob).sum(1)
+        params[-self.nbranches:] = 1  # values for tau's clogit
+        params[-self.nbranches] = 1  # normalized at the top
 
-        print "loglike", loglike.sum()
+        prob = self.get_probs(params)
+
+        loglike = (self.endog_ordered * np.log(prob)).sum(1)
         return loglike.sum()
 
     def score(self, params):
         """
         """
-        loglike = self.loglike
         from statsmodels.tools.numdiff import approx_fprime
-        return approx_fprime(params, loglike, epsilon=1e-8)
+        return approx_fprime(params, self.loglike, epsilon=1e-8)
 
     def hessian(self, params):
         """
         """
+        # TODO
         from statsmodels.tools.numdiff import approx_hess
-        return approx_hess(self.recursionparams, self.loglike)
+        return approx_hess(params, self.loglike)
 
-    def fit(self, start_params=None, maxiter=10, maxfun=5000,
-            method="bfgs", full_output=1, disp=None, callback=None, **kwds):
+    def fit(self, start_params=None, maxiter=None, maxfun=None,
+            method=None, full_output=True, disp=None, callback=None, **kwds):
 
         """
         Returns
@@ -505,15 +505,23 @@ class NLogit(LikelihoodModel):
         """
 
         if start_params is None:
+        # TODO
+            CLogit_res = CLogit(self.endog_data, self.exog_data,
+                                    self.V, self.ncommon, self.ref_level
+                                  ).fit(disp=0)
+            idx = np.array([2, 5, 4, 0, 3, 1])
 
-            start_params = np.zeros(self.nparams)
-            start_params[-self.nbranches:] = 1  # values for tau's
+            start_params = np.r_[CLogit_res.params[idx],
+                                  np.array([1, 1, 1])]
+
+#           start_params = np.zeros(self.nparams)
+#           start_params[-self.nbranches:] = 1  # values for tau's
 
         else:
             start_params = np.asarray(start_params)
 
         start_time = time.time()
-        model_fit = super(NLogit, self).fit(disp = disp,
+        model_fit = super(NLogit, self).fit(disp = disp, full_output = full_output,
                                             start_params = start_params,
                                             method=method, maxiter=maxiter,
                                             maxfun=maxfun, **kwds)
@@ -521,7 +529,6 @@ class NLogit(LikelihoodModel):
         self.params = model_fit.params
         end_time = time.time()
         self.elapsed_time = end_time - start_time
-
         return model_fit
 
 
@@ -534,7 +541,7 @@ if __name__ == "__main__":
 
     url = "http://vincentarelbundock.github.io/Rdatasets/csv/Ecdat/ModeChoice.csv"
     file_ = "ModeChoice.csv"
-    import os
+
     if not os.path.exists(file_):
         import urllib
         urllib.urlretrieve(url, "ModeChoice.csv")
@@ -578,9 +585,9 @@ if __name__ == "__main__":
                  }
 
     # TODO: testxb = 1 fix me shapes (0) (210,4)
-    testxb = 2 #global to class to return strings(testxb = 1)instead of numbers
+    testxb = 2  # global to class to return strings(testxb = 1)instead of numbers
     DEBUG = 0
-    number_data = 200 #number of data to use [1 -210]
+    number_data = 210  # number of data to use [1 -210]
     # Describe model
     nlogit_mod = NLogit(endog_data = y, exog_data = X, V = V,
                         ncommon = ncommon,
@@ -588,21 +595,13 @@ if __name__ == "__main__":
                         ref_level = 'car',
                         name_intercept = 'Intercept')
 
-    # Get probs for fixed params
-    clogit_params = np.array([-0.01550153, -0.0961248 ,  5.2074433 ,
-                              0.01328703,  3.8690427 ,3.16319421])
-    nlogit_params = np.array([-0.03158784, -0.11261758,  6.04237265,
-                              0.02616173,  5.06461963, 4.09632551 ]) #¿0.015333? R:0.02616173
-
-    idx = np.array([2,5,4,0,3,1])   # index to reorder
-    params_clogit =  np.r_[clogit_params[idx], np.array([1, 1, 1])]
-    params_nlogit =  np.r_[nlogit_params[idx], np.array([1, 0.586009, 0.388962])]
-
-#    print nlogit_mod.get_probs(params_nlogit) # 0.373408057	0.15153919	0.3518454625	0.1232072868
-#    print nlogit_mod.get_probs(params_clogit) #[ 0.07885308  0.36981623  0.3828983   0.16843239]
-    check_datadict = nlogit_mod.datadict
-
     # Fit model
-    nlogit_res = nlogit_mod.fit( start_params = params_clogit )
+    nlogit_res = nlogit_mod.fit( maxiter = 100,
+                                 maxfun= 100,
+                                 method = "bfgs",
+                                 gtol = 10e-8,
+                                 retal = True,
+                                 disp = True,)
+
     print nlogit_res.params
-#    print nlogit_res.llf
+    print nlogit_res.llf
